@@ -1,0 +1,259 @@
+---
+title: "Earthquakes and Movies"
+author: Collin Gates
+format: html
+execute: 
+  echo: false
+---
+
+
+```{r}
+#| message: false
+library(tidyverse)
+library(leaflet)
+library(rvest)        
+library(httr2)
+library(ggrepel)   
+```
+
+
+```{r}
+library(jsonlite)
+library(tidyverse)
+
+# --- Custom Functions ---
+
+# Function 1: Convert Milliseconds to Datetime
+convert_earthquake_time <- function(milliseconds) {
+  as.POSIXct(milliseconds / 1000, origin = "1970-01-01", tz = "UTC")
+}
+
+# Function 2: Categorize Earthquake Magnitude
+categorize_magnitude <- function(mag) {
+  case_when(
+    mag < 3.0 ~ "Minor",
+    mag < 4.0 ~ "Light",
+    mag < 5.0 ~ "Moderate",
+    mag < 6.0 ~ "Strong",
+    mag < 7.0 ~ "Major",
+    mag >= 7.0 ~ "Great",
+    TRUE      ~ NA_character_ # Safety catch for weird data
+  )
+}
+
+# --- Main Data Pipeline ---
+
+earthquakes_data <- read_json("data/earthquakes.geojson") |> 
+  pluck("features") |> 
+  tibble(data = _) |> 
+  unnest_wider(data) |> 
+  unnest_wider(properties, names_sep = "_") |> 
+  hoist(geometry, coordinates = "coordinates") |> 
+  unnest_wider(coordinates, names_sep = "_") |> 
+  rename(
+    longitude = coordinates_1,
+    latitude  = coordinates_2,
+    depth     = coordinates_3
+  ) |> 
+  mutate(across(where(is.character), ~ na_if(., "null"))) |> 
+  filter(!if_any(c(properties_mag, latitude, longitude), is.na)) |> 
+  mutate(
+    time_converted = convert_earthquake_time(properties_time),
+    # New Step: Create the categorical column
+    mag_category = categorize_magnitude(properties_mag)
+  )
+
+# Verify the result
+count(earthquakes_data, mag_category)
+```
+
+
+```{r}
+#| cache: true
+earthquake_df <- jsonlite::read_json("data/earthquakes.geojson") |>
+  pluck("features") |> 
+  tibble(data = _) |> 
+  unnest_wider(data) |> 
+  unnest_wider(properties, names_sep = "_") |> 
+  hoist(geometry, coordinates = "coordinates") |> 
+  unnest_wider(coordinates, names_sep = "_") |> 
+  rename(
+    longitude = coordinates_1,
+    latitude  = coordinates_2,
+    depth     = coordinates_3
+  )|>
+    mutate(across(where(is.character), ~ifelse(.x == "null", NA, .x))) |>
+    filter(!if_any(c(properties_mag, longitude, latitude), is.na))|>
+        mutate(
+            datetime = convert_earthquake_time(as.numeric(properties_time)),
+            mag_category = categorize_magnitude(as.numeric(properties_mag))
+        )|>
+mutate(across(c(properties_mag, depth), as.numeric)) |>
+  filter(datetime >= Sys.Date() - 7) |>
+filter(longitude >= -125, longitude <= -66, latitude >= 20, latitude <= 50) |>
+mutate(
+  hour = hour(datetime),
+  day_of_week = wday(datetime, label = TRUE),
+  depth_category = case_when(
+    depth < 70 ~ "Shallow",
+    depth < 300 ~ "Intermediate",
+    depth < 600 ~ "Deep"
+  )
+) |>
+    select(longitude, latitude, properties_mag, properties_place, datetime, depth, mag_category, depth_category) |>
+    mutate(
+        tooltip_text = paste0(
+        "Magnitude: ", properties_mag, " (", mag_category, ")<br>",
+        "Location: ", properties_place, "<br>",
+        "Time: ", format(datetime, "%Y-%m-%d %H:%M"), "<br>",
+        "Depth: ", round(depth, 1), " km (", depth_category, ")"
+    )
+    )|>
+    filter(
+        longitude >= -180, longitude <= 180,
+        latitude >= -90, latitude <= 90,
+        properties_mag >= 0, properties_mag <= 10
+    ) |>
+mutate(
+  color = case_when(
+    properties_mag >= 6 ~ "red",
+    properties_mag >= 5 ~ "orange",
+    properties_mag >= 4 ~ "yellow",
+    properties_mag >= 3 ~ "green",
+    TRUE ~ "blue"
+  )
+) |>
+arrange(desc(properties_mag))
+```
+
+```{r}
+library(ggplot2)
+library(maps)
+
+# 1. Preview the data structure (Top 3 rows)
+head(earthquake_df, 3)
+#   longitude latitude properties_mag properties_place          datetime depth mag_category
+# 1   -115.62    33.15            3.8 Calipatria, CA   2023-10-27...   5.2        Light
+# 2   -122.80    38.80            2.1 The Geysers, CA  2023-10-27...   1.8        Minor
+# 3   -117.30    34.50            4.2 Victorville, CA  2023-10-26...   8.1     Moderate
+
+# 2. Get the background map data for the US
+us_states <- map_data("state")
+
+# 3. Create the Map
+ggplot() +
+  # Layer 1: The US Background
+  geom_polygon(data = us_states, 
+               aes(x = long, y = lat, group = group),
+               fill = "#f0f0f0", color = "white") +
+  
+  # Layer 2: The Earthquakes
+  geom_point(data = earthquake_df,
+             aes(x = longitude, y = latitude, 
+                 size = properties_mag, 
+                 color = color,       # Uses the Hex codes we created
+                 text = tooltip_text), # For interactivity later
+             alpha = 0.8) +
+  
+  # Formatting
+  scale_color_identity() +       # tells ggplot to use the actual hex string as the color
+  scale_size_continuous(range = c(2, 8), guide = "none") + # Adjust dot size
+  theme_minimal() +
+  
+  # Labels
+  labs(
+    title = "Seismic Activity: Continental United States",
+    subtitle = paste("Recent Earthquakes (Past 7 Days) | N =", nrow(earthquake_df)),
+    caption = "Data Source: USGS Earthquake Hazards Program",
+    x = NULL, 
+    y = NULL
+  ) +
+  theme(
+    axis.text = element_blank(), # Hide lat/long numbers for a cleaner map
+    panel.grid = element_blank()
+  )
+```
+
+
+```{r}
+#| cache: true
+top_movies <- request("https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/") |> 
+  req_perform() |> 
+  resp_body_html() |> 
+  html_element("table") |>
+  html_table() |>
+  select(
+    rank_title_year = `Rank & Title`,
+    rating = `IMDb Rating`
+  ) |>
+  mutate(
+    rank_title_year = str_replace_all(rank_title_year, "\n +", " "),
+    rating_details = request("https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/") |> 
+  req_perform() |> 
+  resp_body_html() |> 
+      html_elements("td strong") |>
+      html_attr("title")
+  ) |>
+  separate_wider_regex(
+    rank_title_year,
+    patterns = c(
+      rank = "\\d+", "\\. ",
+      title = ".+", " +\\(",
+      year = "\\d+", "\\)"
+    )
+  ) |>
+  separate_wider_regex(
+    rating_details,
+    patterns = c(
+      "[0-9.]+ based on ",
+      number = "[0-9,]+",
+      " user ratings"
+    )
+  ) |>
+  mutate(
+    number = parse_number(number),
+    across(c(rank, year), as.numeric),
+    decade = paste0(floor(year/10)*10, "s"),
+    rating_category = case_when(
+      rating >= 9.0 ~ "Masterpiece (9.0+)",
+      rating >= 8.5 ~ "Excellent (8.5-8.9)", 
+      rating >= 8.0 ~ "Great (8.0-8.4)",
+      TRUE ~ "Good (<8.0)"
+    ),
+    popularity = case_when(
+      number >= 2000000 ~ "Very Popular (2M+)",
+      number >= 1000000 ~ "Popular (1M-2M)",
+      number >= 500000 ~ "Moderate (500K-1M)",
+      TRUE ~ "Niche (<500K)"
+    )
+  ) |>
+  select(rank, title, year, rating, number) |>
+  arrange(rank)
+```
+
+```{r}
+library(ggplot2)
+library(viridis)
+
+# Generating the visualization
+ggplot(imdb_final, aes(x = year, y = rating, size = number, color = rating)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, color = "grey40", size = 0.5, linetype = "dashed") +
+  scale_color_viridis_c(option = "magma") +
+  scale_size_continuous(labels = scales::comma) +
+  theme_minimal() +
+  labs(
+    title = "IMDb Top 250: Ratings vs. Time",
+    subtitle = "Point size represents the number of user votes; line shows the general rating trend over decades.",
+    x = "Year of Release",
+    y = "IMDb Rating",
+    size = "Total Votes",
+    color = "Rating",
+    caption = "Source: Archived IMDb Top 250 Data (2022)"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(color = "grey30")
+  )
+```
